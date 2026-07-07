@@ -1,0 +1,545 @@
+# Default Hydra configuration for CMR-Net.
+
+project:
+  name: cmr-net
+  seed: 42
+  output_dir: outputs
+
+output:
+  # Avoid multi-seed server runs overwriting each other's artifacts. When the
+  # default `results/` and `checkpoints/` roots are used, scripts write into
+  # `results/seed<seed>/` and `checkpoints/seed<seed>/`.
+  isolate_by_seed: true
+  run_name: null
+  checkpoint_dir: checkpoints
+  checkpoint_name: cmr_net_final.pt
+
+distributed:
+  enabled: false
+  backend: nccl
+  timeout_minutes: 120
+  rank: 0
+  local_rank: 0
+  world_size: 1
+  sync_batchnorm: false
+  broadcast_buffers: true
+  # Fast DDP path. Inactive auxiliary branches (for example lambda_ib=0) are
+  # frozen before DDP wrapping instead of relying on unused-parameter graph
+  # traversal. Set true only for debugging a newly introduced conditional
+  # branch.
+  find_unused_parameters: false
+
+data:
+  root: data
+  batch_size: 8
+  num_workers: 4
+  pin_memory: false
+  drop_last: false
+  modalities:
+    - video
+    - audio
+    - sensor
+  # Round-11 P1: opt-in class-balanced sampler for rare-class oversampling.
+  # When true, the train loader draws sample indices with replacement using
+  # effective-number weights derived from train class counts so rare classes
+  # (e.g. class 5 on suffix12) appear in every batch. The DOE-aware sampler
+  # is still used for val/test.
+  class_balanced_sampler: false
+  class_balanced_weight_mode: effective_number  # effective_number | inverse | uniform
+  # Round-13: bumped 8.0 -> 16.0. Round-12 per-class report showed class 5
+  # recall=0.000 and class 9 recall<0.10 despite the class-balanced sampler.
+  # With max_weight=8 the effective-number weight for class 5 saturated below
+  # the gradient needed to lift recall off the floor on a 12-class problem.
+  class_balanced_max_weight: 16.0
+  class_balanced_effective_beta: 0.999
+  class_balanced_num_batches: null
+  synthetic:
+    enabled: true
+    num_samples: 96
+    train_fraction: 0.7
+    val_fraction: 0.15
+    num_doe_cells: 12
+    process_seq_len: 32
+    audio_seq_len: 48
+    n_mels: 64
+    video_num_frames: 8
+    video_channels: 3
+    video_height: 32
+    video_width: 32
+    num_classes: 3
+  real:
+    root: ${oc.env:CMR_DATA_ROOT,data/intel_robotic_welding_dataset}
+    label_mode: suffix12   # suffix12 or binary_good_defect
+    max_samples: null
+    scaler_fit_max_samples: 256
+    train_fraction: 0.7
+    val_fraction: 0.15
+    # Round-14 M4: split strategy. ``doe_cell`` (default, legacy) preserves
+    # full DOE-cell isolation across splits but causes class-5 starvation
+    # on suffix12 (round-13: 4 test samples, recall=0). ``stratified_doe_cell``
+    # keeps cell-level isolation and greedily moves cells from train to test
+    # until each class has at least ``min_per_class_test`` samples in test.
+    # ``stratified_sample`` falls back to record-level stratification when a
+    # class lives in only one DOE cell.
+    split_mode: doe_cell
+    min_per_class_test: 8
+    process_seq_len: 32
+    audio_seq_len: 48
+    n_mels: 64
+    video_num_frames: 8
+    video_channels: 3
+    video_height: 32
+    video_width: 32
+    default_thickness_mm: 3.0
+
+model:
+  name: cmr_net
+  hidden_dim: 256
+  dropout: 0.1
+  d_C: 7
+  d_P_obs: 6
+  d_z_T: 64
+  d_Z_P: 32
+  # Split process mediator: first d_Z_P_anchor dims are allowed to carry
+  # treatment/context-correlated process state; remaining dims encode residual
+  # P_obs variation not supplied by T,C.
+  d_Z_P_anchor: 16
+  d_Z_A: 32
+  d_Z_V: 32
+  num_classes: 3
+  num_families: 3
+  num_risk_classes: 2
+  num_heads: 4
+  # Round-12: configurable dropouts inside ProcessMechanismEncoder. The round-11
+  # run reported P_obs train recon ~0.07 vs val ~4.5, a textbook overfit on the
+  # anchor / explainer path. Setting these > 0 inserts nn.Dropout layers in the
+  # treatment_explainer (f(z_T, C) -> P_obs hat) and the residual decoder
+  # (Z_P -> P_obs hat) respectively.
+  process_decoder_dropout: 0.1
+  process_explainer_dropout: 0.1
+  # Round-13: explicit Z_P -> Y classifier head used to compute L_zp_to_y.
+  # ``zp_classifier_hidden_dim`` defaults to hidden_dim // 2 inside model.py
+  # when null. Keep a moderate dropout so the head cannot just memorize the
+  # train Z_P -> Y mapping at the expense of the mediator role.
+  zp_classifier_hidden_dim: 128
+  zp_classifier_dropout: 0.2
+  # Round-15/18: explicit dual-pathway decomposition (NIE / NDE).
+  # When ``enabled=true`` the model instantiates a MediatedHead (Z_P, C) and
+  # a DirectResidualHead (A/V residuals only; optional gate); the main
+  # ``logits`` output becomes ``logits_pathway = logits_mediated +
+  # logits_direct``. When disabled the model keeps its legacy single-
+  # classifier behaviour and these heads are not instantiated, so toggling
+  # this flag is fully backward compatible.
+  pathway_decomposition:
+    enabled: false
+    replaces_main_logits: true
+    # MediatedHead settings. ``use_anchor_only=true`` restricts the mediator
+    # input to the first d_Z_P_anchor dims (matches the identifiability story
+    # where only the anchor block is T-aligned). ``use_treatment_embedding``
+    # adds z_T as an extra input — keep false unless you want the mediator to
+    # see the treatment directly as well as through Z_P.
+    mediated_use_anchor_only: false
+    mediated_use_treatment_embedding: false
+    mediated_hidden_dim: 128
+    mediated_dropout: 0.2
+    # DirectResidualHead settings. The release path conditions the raw direct
+    # head on context C, but keeps direct_condition_on_mediated=false so it
+    # cannot copy Z_P as a second process classifier.
+    direct_condition_on_mediated: false
+    direct_condition_on_context: true
+    direct_condition_dropout: 0.0
+    direct_hidden_dim: 128
+    direct_bottleneck_dim: 64
+    direct_dropout: 0.1
+    # Round-17 P0-b: gated residual direct head.
+    # ``logits_full = logits_mediated + alpha * logits_direct_raw``,
+    # where ``alpha`` is a per-sample sigmoid gate. ``direct_gate_target``
+    # is the mean alpha the regulariser pulls toward (0.1 ≈ 10% residual
+    # contribution at equilibrium). ``direct_gate_init_bias`` is the
+    # final-layer bias of the gate MLP — chosen so the gate starts near
+    # the target rather than at 0.5, which lets the mediator dominate
+    # from step 0.
+    direct_gate_enabled: false
+    direct_gate_target: 0.1
+    direct_gate_alpha_max: 0.3
+    direct_gate_hidden_dim: null
+    direct_gate_init_bias: -2.0
+    # Round-18: causal-safe inference mode. When True and the model is in
+    # eval mode, ``outputs["logits"]`` / ``outputs["Y_logit"]`` are set to
+    # ``logits_mediated`` (NIE only). The direct head still runs in
+    # forward (so diagnostics see ``logits_direct`` and training still
+    # absorbs residual structure through it) but is *not summed* into
+    # the deployed prediction. Motivation: on this dataset the additive
+    # output lets the direct head's sharper-but-quieter logits dominate
+    # argmax even when the mediator owns ~82% of logit-norm. Switching
+    # the inference path to mediator-only restores the "Y = f(Z_P, C)"
+    # causal interpretation without changing the training-time loss
+    # surface; the dual-pathway additive output remains available as an
+    # ablation row.
+    inference_mediated_only: false
+
+  process_teacher:
+    enabled: false
+    kind: process_mini_rocket
+    checkpoint_template: checkpoints/round20_baselines/process_mini_rocket/process_mini_rocket_seed{seed}.pt
+
+  # Round-17 P0-a: per-modality conditional treatment adversaries.
+  # When enabled, ``Adv_A`` and ``Adv_V`` predict ``T`` from
+  # ``Z_M - f_M_cond(Z_P, C)`` through a gradient-reversal layer.
+  # Round-16 confirmed the encoders carry residual T-info beyond what
+  # ``(Z_P, C)`` explains (video HSIC p=0.002), and this module
+  # actively scrubs that leak at training time. ``init_lambda=0`` lets
+  # the trainer ramp the GRL coefficient over
+  # ``training.av_t_adv_warmup_ratio`` of stage 1 — do NOT cold-start
+  # at full strength.
+  av_t_adversary:
+    enabled: false
+    subtractor_hidden_dim: 128
+    adversary_hidden_dim: 128
+    subtractor_dropout: 0.1
+    adversary_dropout: 0.1
+    init_lambda: 0.0
+    detach_zp: true
+    # Feed Z_A/Z_V residuals (Z_M - f_M(Z_P,C).detach()) into the direct
+    # residual head. This is the main round-18 fix for direct-pathway
+    # dominance: the head no longer sees raw treatment-contaminated modality
+    # embeddings.
+    use_residual_for_direct: false
+
+training:
+  device: auto
+  # Keep project.seed fixed for data splits; vary training.run_seed for
+  # multi-seed model initialisation / stochastic training runs.
+  run_seed: null
+  deterministic: false
+  epochs: 100
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-5
+  # Effective-batch repair knob. Keep at 1 for historical runs; set to 2/4 in
+  # Phase-4 repair ablations when GPU memory prevents increasing data.batch_size.
+  gradient_accumulation_steps: 1
+  grad_clip_norm: 1.0
+  mixed_precision: true
+  ema_decay: 0.999
+  enable_dih: true
+  enable_hsic: true
+  enable_negative_pairs: true
+  lambda_I_start: 0.01
+  lambda_I_end: 0.1
+  # lambda_F: HSIC penalty weight. Was 0.05 (effectively zero given the
+  # 32-RFF / sigma=1.0 implementation produced HSIC ~= 1e-14 during training).
+  # Bumped to 0.5 now that the rewritten 512-RFF + median-bandwidth + buffered
+  # implementation produces stable values in the 1e-2..1e-1 range.
+  lambda_F: 0.5
+  kl_warmup_ratio: 0.5
+  sibling_c_tolerance: 0.25
+  # Round-13: bumped 1 -> 2. Round-12 dih_monitor showed L_int_mediator
+  # variance was high and CATE std stayed pessimistic; with one pair per
+  # anchor the gradient signal was thin. Two pairs ~doubles intervention
+  # coverage per batch and reduces the variance of the MMD/MSE estimators
+  # without committing to large compute increases.
+  max_pairs_per_anchor: 2
+  require_different_doe_cell: false
+  # Leave per-stage epochs null when using experiment.shared_epochs. To run a
+  # custom curriculum, set experiment.shared_epochs=null and provide:
+  # stage_epochs: {stage1: N1, stage2: N2, stage3: N3, stage4: N4}
+  stage_epochs: null
+  # Round-11: fraction of stage-1 steps over which the GRL coefficient is
+  # ramped from 0 to loss.adv_t_lambda. 0.5 means the adversary reaches full
+  # strength halfway through stage 1; lower values make the adversary kick in
+  # earlier and risk destabilizing mu_residual.
+  adv_t_warmup_ratio: 0.5
+  # Round-12: stage at which the GRL coefficient is multiplied by
+  # ``adv_t_lambda_late_multiplier`` (<= 1.0). The round-11 adversary at
+  # lambda=1.0 successfully drove residual->T R^2 from 0.82 -> 0.34 but
+  # collapsed residual rank (16/16 dims with std<1e-3). Easing the adversary
+  # in later stages lets the variance floor restore rank once T-leak is
+  # already scrubbed. Setting multiplier=1.0 disables the decay.
+  adv_t_late_stage_start: 3
+  adv_t_lambda_late_multiplier: 0.5
+  # Round-17 P0-a: warmup ratio for the per-modality A/V treatment
+  # adversary GRL coefficient. Same shape as ``adv_t_warmup_ratio`` for
+  # the phi_P adversary. The final value is ``loss.av_t_adv_lambda``.
+  av_t_adv_warmup_ratio: 0.5
+  log_every_n_steps: 20
+  methodology_log_every_n_steps: 100
+  sibling_log_every_n_steps: 1000
+  checkpoint_every_n_epochs: 5
+  # Round-13: bumped 128 -> 1024. Round-12 hsic_monitor reported raw HSIC
+  # ~1e-7 across all stages with the 128-row buffer — statistically below
+  # any plausible falsifier threshold. A 1024-row buffer gives the
+  # 512-RFF estimator the sample mass needed to surface real conditional
+  # dependence in the (A,V) ⫫ Y | Z_P,T,C audit.
+  hsic_buffer_size: 1024
+  # Codex-analysis fix: ddp_full_seed42 reported negative_pair_accuracy_drop
+  # = 0.0, i.e. the model classified A/V-swapped negatives identically to the
+  # positives. The hinge L_neg = relu(margin - (acc_pos - acc_neg)) needs a
+  # larger margin so the gradient remains active once the network already
+  # achieves a small drop. Bumped 0.2 -> 0.4 to push for a noticeable gap.
+  neg_margin_target: 0.4
+  neg_margin_weight: 1.0
+  neg_logit_margin_target: 1.0
+  neg_logit_margin_weight: 1.0
+  neg_uniform_weight: 0.25
+  neg_match_weight: 1.0
+  # Auxiliary supervision on pre-Z_P private modality embeddings. This is a
+  # deliberate anti-collapse guard: if audio/video carry class signal, Z_A and
+  # Z_V must learn it before fusion can ignore it.
+  lambda_audio_aux: 0.2
+  lambda_video_aux: 0.2
+  lambda_family_aux: 0.2
+  lambda_risk_aux: 0.1
+  # Construct negative pairs from different defect labels whenever the batch
+  # contains such samples. This avoids weak same-class swaps that do not force
+  # the network to react to audio/video content.
+  negative_pair_hard_labels: true
+  negative_media_bank_size: 512
+  # Modality dropout on the classifier's Z_P block. This does not alter the
+  # causal mechanism path; it only prevents the classifier from solving every
+  # batch from the dominant process representation. Probability is linearly
+  # annealed within each stage.
+  zp_classifier_dropout_start: 0.1
+  zp_classifier_dropout_end: 0.3
+  # Round-13: per-sample random dropout on the A/V tokens INSIDE the fusion
+  # cross-attention. Round-12 process_only_macro_f1=0.094 vs
+  # media_only_macro_f1=0.841 showed Z_P had stopped acting as the mediator
+  # because the classifier had built a strong (A,V) bypass. Symmetric A/V
+  # dropout active from stage 2 onward forces the classifier to occasionally
+  # solve batches without one media channel, restoring pressure on Z_P.
+  av_dropout_stage_start: 2
+  av_dropout_start: 0.2
+  av_dropout_end: 0.2
+  # Explicit full-logit dependency term for mismatched raw A/V pairs:
+  # relu(margin - (true_logit_full - true_logit_mismatch)).
+  lambda_full_mismatch_dependency: 2.0
+  full_mismatch_logit_margin: 1.0
+  # Label-aware mismatch objective: when anchor i receives raw media from a
+  # different-label sample j, the negative logits should move toward y_j and
+  # away from y_i. This targets semantic modality dependence directly; it is
+  # more relevant than asking the pair-match head to recover sample identity.
+  lambda_label_mismatch_dependency: 1.0
+  label_mismatch_margin: 0.2
+  # Optional identity-style pair matching over (Z_P, C) anchors and private
+  # audio/video embeddings. Default off because round7 runs showed this head
+  # hovered near chance and did not improve negative-pair degradation.
+  lambda_match_contrastive: 0.0
+  match_contrastive_temperature: 0.2
+
+experiment:
+  # When set, splits the budget evenly across the four training stages and
+  # overrides training.stage_epochs.*. Set null and use training.stage_epochs
+  # for a custom per-stage curriculum. P2.1 audit fix (scripts/train.py):
+  # setting BOTH experiment.shared_epochs and any training.stage_epochs.*
+  # now raises ValueError instead of silently overriding.
+  shared_epochs: null
+
+# Backward-compatible alias for `experiment` (older scripts / CI used the
+# plural form). scripts/train.py and scripts/run_ablations.py read
+# `experiment.shared_epochs` first and fall back to `experiments.shared_epochs`.
+experiments:
+  include_ablations: true
+  include_baselines: true
+  shared_epochs: null
+  max_variants: null
+  baseline_epochs: null
+  baseline_prediction_loss: focal
+
+losses:
+  weights:
+    reconstruction: 1.0
+    response: 1.0
+    consistency: 0.1
+    regularization: 0.01
+
+loss:
+  focal_gamma: 2.0
+  use_class_weights: true
+  # Effective-number weights with a cap keep rare classes visible without
+  # letting tiny supports dominate the whole classifier. This replaces the
+  # older uncapped inverse-frequency default that caused class-8 -> class-5
+  # collapse in the round7 tuned smoke run.
+  class_weight_mode: effective_number
+  class_weight_max: 2.0
+  class_weight_effective_beta: 0.999
+  kl_free_bits: 0.5
+  kl_beta: 0.2
+  lambda_pobs_recon: 2.0
+  # Round-13: stage-aware ``lambda_pobs_recon``. Round-12 held this at 2.0
+  # for all four stages. Late-stage diagnostics show P_obs reconstruction
+  # has already settled and the extra weight crowds out HSIC + DIH. Stages
+  # 3-4 step it down to 1.0 so full-objective gradient is freed for
+  # mediator-quality terms.
+  lambda_pobs_recon_late: 1.0
+  lambda_pobs_recon_late_stage_start: 3
+  # Round-13: bumped 0.75 -> 1.5. Round-12 mi_process_share stayed below
+  # 0.03 of the mechanism loss while process_only_macro_f1 collapsed to
+  # 0.094. Doubling the MI weight tightens InfoNCE pressure on Z_P -> P_obs
+  # and is part of the multi-pronged push to restore Z_P sufficiency.
+  lambda_mi: 1.5
+  # Round-13: explicit Z_P -> Y supervision weight. CE(zp_classifier(Z_P), Y).
+  # Active immediately (no stage gating) because the entire point of the
+  # mediator definition is that Z_P alone should suffice for Y.
+  lambda_zp_to_y: 0.5
+  # CaMIB auxiliary bottleneck heads are disabled by default. With lambda_ib=0
+  # their parameters are frozen before DDP wrapping so DDP does not wait for
+  # gradients from a deliberately inactive loss branch.
+  lambda_ib: 0.0
+  mi_temperature: 0.2
+  # HSIC RFF dimension. Rounded up to next pow2 inside ConditionalHSICLoss.
+  # 512 is a safe default; bandwidth uses the median heuristic per call.
+  hsic_rff_features: 512
+  # Mediator-consistency weight inside L_int.
+  #     L_int = L_int_logits + lambda_int_mediator * L_int_mediator
+  # where L_int_mediator = MSE(Z_P_do, Z_P_sibling). 0.5 is the design-spec
+  # default and roughly matches the outcome-level intervention term scale.
+  lambda_int_mediator: 0.5
+  # Residual Z_P decorrelation regularizer. The first d_Z_P_anchor dims are
+  # allowed to be treatment/context-correlated; this penalty is applied to
+  # mu_residual / Z_P_residual so the residual process block keeps useful
+  # rank without fighting the expected T -> process relationship.
+  lambda_zp_decorr: 0.05
+  # Weakly discourage the residual process block from re-encoding treatment.
+  # The anchor block is still allowed to carry T-correlated state for DIH.
+  # Round-11 raises this from 0.02 -> 0.1 because the round-10 diagnostic
+  # showed Z_P_residual -> T R^2 = 0.824 even with the previous weight; the
+  # linear-covariance form needs noticeably more push, and is now backed up
+  # by the GRL adversary below for nonlinear leakage.
+  lambda_zp_residual_t_decorr: 0.1
+  # Number of detached historical Z_P rows used when estimating the
+  # decorrelation/variance regularizer. This avoids estimating a 32-D
+  # covariance matrix from a per-GPU mini-batch of only 8 rows.
+  zp_decorr_buffer_size: 256
+  # Round-11 — P_obs anchor-recon supervision. The residual backbone consumes
+  # P_obs - f(z_T, C).detach(); without this term f(z_T, C) collapses to 0
+  # and the residual encoder regains a path to T via raw P_obs. Trains the
+  # treatment_explainer head with an MSE / smooth-L1 against full P_obs.
+  lambda_pobs_anchor_recon: 0.5
+  # Round-11 — GRL treatment adversary on Z_P_residual. Forward pass is a
+  # standard regression MSE between the adversary's prediction and the raw
+  # treatment vector; the gradient-reversal layer inside the encoder flips
+  # the gradient sign before it reaches mu_residual, so the encoder is
+  # actively pushed to strip T information out of the residual block. This
+  # is the nonlinear complement to lambda_zp_residual_t_decorr.
+  lambda_zp_residual_t_adv: 1.0
+  # GRL coefficient applied to the gradient flowing back into mu_residual.
+  # Linearly ramped from 0 to this value over the first half of stage 1 (see
+  # training.adv_t_warmup_ratio) so the early-training encoder is not
+  # destabilized by a random adversary. Hold at the final value from stage 2,
+  # then optionally decayed in late stages via
+  # training.adv_t_lambda_late_multiplier. Round-12 default is 0.5 (was 1.0)
+  # because round-11 demonstrated 1.0 was effective at stripping T but
+  # collapsed residual variance.
+  adv_t_lambda: 0.5
+  # Round-12 — VICReg-style variance floor on mu_residual. Round-11 showed
+  # the GRL adversary at full strength flattened all 16 residual dimensions
+  # to std<1e-3, dropping stable_rank below the 3.0 gate. This loss applies
+  # std_loss = relu(target - std(mu_residual_dim)).pow(2).mean() per dim,
+  # independent of the linear-covariance term in lambda_zp_decorr. The
+  # off-diagonal covariance is also penalised, scaled by cov_weight.
+  lambda_zp_residual_variance: 0.5
+  zp_residual_variance_target: 1.0
+  zp_residual_variance_cov_weight: 1.0
+  # Round-15: dual-pathway identifiability terms. All three default to 0
+  # so existing training recipes are unchanged unless this section is
+  # explicitly turned on together with model.pathway_decomposition.enabled.
+  #   L_pathway_orth: cross-covariance between Z_P and the bottlenecked
+  #     modality feature Z_D the direct head actually consumes. Prevents
+  #     the two pathways from sharing information.
+  #   L_pathway_balance: soft band penalty on ||logits_med|| /
+  #     ||logits_dir||. Penalty is zero inside [1/ratio_max, ratio_max].
+  #   L_pathway_pred: auxiliary CE on the mediated pathway. Direct CE defaults
+  #     to zero in round-18 because it made the direct head a second complete
+  #     classifier instead of a residual correction.
+  lambda_pathway_orth: 0.0
+  lambda_pathway_balance: 0.0
+  lambda_pathway_pred: 0.0
+  pathway_orth_mode: linear_xcov            # or analytical_hsic
+  pathway_balance_ratio_max: 4.0
+  pathway_pred_weight_mediated: 1.0
+  pathway_pred_weight_direct: 0.0
+  pathway_pred_label_smoothing: 0.0
+  # Round-18: direct-residual constraints. Gate target mode "uncertainty"
+  # sets alpha_target = alpha_max * (1 - p_mediated(y_true)), so direct only
+  # speaks when the mediated pathway is uncertain. ``direct_raw_norm`` keeps
+  # the un-gated direct stream small; ``direct_quiet`` suppresses the gated
+  # stream on high-confidence mediated samples.
+  lambda_direct_gate: 0.0
+  direct_gate_target_mode: constant          # constant or uncertainty
+  lambda_direct_raw_norm: 0.0
+  lambda_direct_quiet: 0.0
+  direct_quiet_confidence_threshold: 0.75
+  # Round-17 P0-a: per-modality conditional treatment-adversary MSE weights.
+  # Default zero so existing recipes are unchanged unless explicitly
+  # enabled together with ``model.av_t_adversary.enabled=true``.
+  # Round-16 evidence (audio HSIC p=0.036, video HSIC p=0.002) motivates a
+  # *stronger* push on the video pathway than on audio at round-17 onset.
+  lambda_audio_t_adv: 0.0
+  lambda_video_t_adv: 0.0
+  # GRL coefficient applied to gradient flowing back into phi_A / phi_V.
+  # Ramped from 0 to this value over ``training.av_t_adv_warmup_ratio``.
+  av_t_adv_lambda: 1.0
+  lambda_process_teacher_kl: 0.0
+  process_teacher_temperature: 2.0
+  process_teacher_warmup_ratio: 0.3
+evaluation:
+  # ``null`` means "auto-discover under ``checkpoints/<run_name>/`` using
+  # the standard search order: best_stage4_ema_state_dict >
+  # best_ema_state_dict > ema_state_dict > model_state_dict". The legacy
+  # truncation ``checkpoint_path: nu`` (literal string!) is now caught
+  # by ``tests/test_import.py``.
+  checkpoint_path: null
+  # scripts/evaluate.py consumes the held-out test split. Keep this false
+  # during development; Phase 5 must pass evaluation.allow_test_evaluation=true
+  # or set CMR_NET_ALLOW_TEST_EVALUATION=1 explicitly.
+  allow_test_evaluation: false
+  # Where ``scripts/evaluate.py`` writes ``evaluation_*.json`` and the
+  # markdown summary. Resolved relative to project root unless absolute.
+  results_dir: results
+  # Methodology-validation report root (HSIC scatter, MCC table,
+  # factual / counterfactual figures). Defaults under ``results/`` so a
+  # multi-seed run keeps everything together.
+  methodology_dir: results/methodology
+  # Multi-seed eval grid. ``scripts/evaluate.py`` iterates these to
+  # produce mean +/- stderr columns; falls back to ``[project.seed]``
+  # when null.
+  seeds: [42, 43, 44]
+  # Headline metrics the report tables sort/rank by.
+  metrics: [macro_f1, accuracy, auroc, mcc]
+  hsic_bootstrap: 200
+  # Round-14 M2: analytical conditional HSIC + permutation null. This is
+  # the proper hypothesis test for X ⫫ Y | Z. The RFF-based
+  # ``evaluate_hsic_falsifiability`` above only resolves the *value* of
+  # CHSIC, which round-13 showed sits at 1e-7 -- below the 1e-6 reject
+  # threshold by construction. The analytical test calibrates rejection
+  # against the empirical permutation null on the same data.
+  hsic_analytical_enabled: true
+  # Number of permutations for the null distribution. 500 gives ~0.002
+  # resolution on the p-value, which is enough for the 0.05 cutoff.
+  hsic_n_permutation: 500
+  # Optional subsampling cap for the analytical test. The Gram matrices
+  # are O(n^2); n=593 keeps every matrix under ~1.5MB so we run on the
+  # full split by default. Set to e.g. 1024 if scaling to a larger split.
+  hsic_analytical_max_samples: null
+  # Tikhonov ridge for the kernel ridge projector on Z. Scaled by the
+  # mean diagonal of K_z and by n, so a fixed 1e-3 is meaningful across
+  # bandwidths.
+  hsic_analytical_ridge: 1.0e-3
+  # Round-15: dual-pathway diagnostics. The decomposition evaluator
+  # reports per-pathway and joint classification metrics; the
+  # intervention evaluator perturbs one pathway while holding the other
+  # fixed to demonstrate non-degeneracy. Both gracefully return
+  # available=false when model.pathway_decomposition.enabled is off, so
+  # they are safe to leave on.
+  pathway_decomposition_enabled: true
+  pathway_intervention_enabled: true
+  # Number of random within-batch permutations averaged per batch in
+  # the intervention evaluator. 8 keeps eval cost manageable on the
+  # ~600-sample test split while smoothing per-batch noise.
+  pathway_intervention_n_perturb: 8
+  # Standard deviation of the additive Gaussian noise variant
+  # (reported as noise_* in the intervention diagnostic). Set to 0 to
+  # skip the noise leg.
+  pathway_intervention_perturb_scale: 1.0
+  debug_lenient_checkpoint: false
+  # Round-17: when ``true``, ``scripts/evaluate.py`` reads
+  # ``<results_
