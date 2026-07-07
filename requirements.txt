@@ -1,0 +1,13 @@
+# Runtime dependencies (mirror of pyproject.toml [project.dependencies]).
+# Preferred install:  pip install -e .
+# Dev extras:         pip install -e ".[dev]"
+torch>=2.1
+hydra-core
+einops
+wandb
+scikit-learn
+scipy
+numpy
+pandas
+librosa
+av
