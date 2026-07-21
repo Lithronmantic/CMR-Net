@@ -1,18 +1,25 @@
 cff-version: 1.2.0
-message: "If you use this code, please cite the accompanying paper."
-title: "Family-Level Process-Sufficiency Certificate for Modality Reduction in Industrial Multimodal Fusion"
+message: "If you use this software, please cite the associated article."
+title: "CMR-Net"
 abstract: >-
-  CMR-Net (Certificate-guided Multimodal Residual Network): family-level
-  process-sufficiency certificates for deployment-oriented modality reduction
-  in industrial multimodal defect modeling.
+  Certificate-guided Multimodal Residual Network for family-level
+  process-sufficiency certificate evaluation in industrial multimodal defect recognition.
 type: software
 authors:
-  - family-names: "TODO"        # TODO: fill author list (anonymised in manuscript)
-    given-names: "TODO"
-version: "0.1.0"
-date-released: "2026-01-01"      # TODO: update on release
+  - family-names: "Qi"
+    given-names: "Kai"
+  - family-names: "Wang"
+    given-names: "Wenrui"
+  - family-names: "Li"
+    given-names: "Weihan"
+  - family-names: "Zhang"
+    given-names: "Baojian"
+  - family-names: "Xie"
+    given-names: "Lu"
+version: "1.0.0"
+date-released: "2026-07-21"
 license: "MIT"
-repository-code: "https://github.com/USER/cmr-net"   # TODO: update
+repository-code: "https://github.com/Lithronmantic/CMR-Net"
 keywords:
   - multimodal fusion
   - modality reduction

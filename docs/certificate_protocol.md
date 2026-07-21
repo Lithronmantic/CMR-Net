@@ -1,37 +1,35 @@
-# Family-Level Process-Sufficiency Certificate
+# Certificate Protocol
 
-For each defect family the protocol emits one of four states. The repository's
-internal labels map to the paper's four-value scheme as follows:
+For each defect family, the evaluation produces Process-Sufficient (PS), Process-Sufficient with Residual Modality Dependence (PS-RMD), Process-Insufficient (PI), or Indeterminate (IND).
 
-| paper | meaning | internal label |
-|---|---|---|
-| PS     | process path predictively non-inferior; no residual A/V dependence | `process_sufficient` |
-| PS-RMD | process path non-inferior, but residual A/V dependence remains | `process_sufficient` + residual-dependence flag |
-| PI     | process path does not meet the modality-reduction criteria | `non_sufficient` |
-| IND    | insufficient evidence: `n < n_min`, missing inputs, or seed instability | `undetermined` |
+## Candidate diagnostics
 
-> The PS / PS-RMD split is assembled in the paper-facing reassignment step; see
-> `scripts/reassign_family_certificates_ci.py` for the exact mapping.
+Each checkpoint provides:
 
-## Two layers
+- Predictive Non-Inferiority from the upper endpoint of the paired-bootstrap interval for Full minus Process macro-F1;
+- Residual-Pathway Superiority from the lower endpoint of the paired-bootstrap interval for Direct minus Process macro-F1;
+- CHSIC practical-equivalence indicators for the label, audio residual, and video residual diagnostics.
 
-1. **Candidate (per seed)** — CHSIC practical-equivalence on `y / A / V`,
-   Predictive Non-Inferiority (paired-bootstrap CI upper bound `<= m`), and
-   residual-pathway superiority (CI lower bound `> m_sup`).
-2. **Release** — two-level paired bootstrap over seeds and samples (pool),
-   majority CHSIC, then leave-one-seed-out (LOSO) downgrade to IND on
-   instability, plus a `delta`-sweep boundary-sensitivity flag `b_f`.
+## Pooled certificate
 
-## p / q values are diagnostics only
+The pooled procedure resamples training seeds and family instances. CHSIC indicators are aggregated by majority voting.
 
-BH-FDR `q` values and permutation `p` values are reported as
-conditional-independence diagnostics; they do **not** assign the certificate.
-Assignment uses the frozen practical-equivalence width (`delta`), predictive
-non-inferiority margin (`m`), and direct-superiority margin (`m_sup`).
+- PS: Predictive Non-Inferiority passes, the label and residual-modality CHSIC indicators pass, and Residual-Pathway Superiority does not pass.
+- PS-RMD: Predictive Non-Inferiority and the label criterion pass, while residual-modality dependence or Residual-Pathway Superiority remains.
+- PI: the modality-reduction criteria are not satisfied.
+- IND: family support is below the minimum size or the released state is unstable under leave-one-seed-out analysis.
 
-## Implementation
+## Released certificate
 
-- `scripts/family_mediation_diagnostics.py` — per-seed candidate diagnostics.
-- `scripts/reassign_family_certificates_ci.py` — CI-based release assignment.
-- `scripts/certificate_sensitivity_sweep.py` — `delta` / margin sensitivity.
-- `scripts/paired_bootstrap_significance.py` — paired bootstrap intervals.
+The pooled procedure is repeated after removing each training seed. Any disagreement between a leave-one-seed-out state and the pooled state produces IND. Otherwise, the released certificate equals the pooled certificate.
+
+## Parameters
+
+| Parameter | Value |
+|---|---:|
+| `m` | 0.03 |
+| `m_sup` | 0.03 |
+| `delta` | `5e-5` |
+| `n_min` | 40 |
+| `B` | 10000 |
+| CHSIC permutations | 1000 |

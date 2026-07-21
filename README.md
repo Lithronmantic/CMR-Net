@@ -1,71 +1,81 @@
 # CMR-Net
 
-**Certificate-guided Multimodal Residual Network (CMR-Net)** — a research
-codebase for *family-level process-sufficiency certificates* that evaluate,
-before deployment, whether audio/video modalities can be reduced for each defect
-family in industrial multimodal welding-defect modeling.
+Certificate-guided Multimodal Residual Network (CMR-Net) provides frozen-checkpoint inference and family-level process-sufficiency certificate evaluation for industrial multimodal defect recognition.
 
-CMR-Net decomposes a multimodal prediction into a **Process-Mediated Pathway**
-and a **Residual Direct Pathway**, then emits, per defect family, one of four
-certificate states — **PS**, **PS-RMD**, **PI**, **IND** — from Predictive
-Non-Inferiority, Residual Modality Dependence (CHSIC), paired-bootstrap intervals,
-and leave-one-seed-out stability. A deployment-resource accounting maps each state
-to a candidate online modality-usage mode (a pre-deployment quantitative
-reference, not a production deployment).
+The implementation exposes three prediction pathways:
 
-## Repository structure
+- Process-Mediated Pathway: `logits_mediated`
+- Residual Direct Pathway: `logits_direct`
+- Additive Full Pathway: `logits_pathway`
+
+The certificate states are Process-Sufficient (PS), Process-Sufficient with Residual Modality Dependence (PS-RMD), Process-Insufficient (PI), and Indeterminate (IND).
+
+## Repository contents
 
 ```text
-cmr-net/
-├── src/cmr_net/        # model, modules, losses, training, evaluation, baselines
-├── scripts/            # training, evaluation, certificate, bootstrap, perturbation, ablation, figures
-├── configs/            # Hydra configs (default + baselines)
-├── tests/              # unit / smoke tests
-├── docs/               # design, certificate protocol, data, reproducibility, resource accounting
-├── pyproject.toml
-└── README.md
+configs/welding_inference.yaml
+scripts/validate_checkpoint.py
+scripts/certificate_diagnostics.py
+docs/data.md
+docs/reproducibility.md
+docs/resource_accounting.md
+docs/code_map.md
+docs/certificate_protocol.md
 ```
 
-## Install
+The repository provides inference and certificate evaluation. Model training is not included.
+
+## Installation
 
 ```bash
-pip install -e ".[dev]"     # Python >= 3.9, PyTorch >= 2.1
+pip install -r requirements.txt
 ```
+
+Extract the supplied model package so that `src/cmr_net` is available from the repository root. Set the Intel Robotic Welding Multimodal Dataset location:
+
+```bash
+export CMR_DATA_ROOT=/path/to/intel_robotic_welding_dataset
+```
+
+## Checkpoint validation
+
+```bash
+python scripts/validate_checkpoint.py \
+  --config configs/welding_inference.yaml \
+  --checkpoint /path/to/checkpoint.pt
+```
+
+The validation command checks the configuration dimensions, dual-pathway settings, residual gate, direct-head input dimension, and checkpoint contents.
+
+## Certificate evaluation
+
+Five checkpoints are required to reproduce the cross-seed certificate release procedure:
+
+```bash
+python scripts/certificate_diagnostics.py \
+  --config configs/welding_inference.yaml \
+  --checkpoint \
+    /path/to/seed0.pt \
+    /path/to/seed1.pt \
+    /path/to/seed2.pt \
+    /path/to/seed3.pt \
+    /path/to/seed4.pt \
+  --split test \
+  --n-bootstrap 10000 \
+  --n-permutation 1000 \
+  --min-family-n 40 \
+  --f1-equivalence-margin 0.03 \
+  --direct-gap-margin 0.03 \
+  --equivalence-delta 5e-5 \
+  --output-dir results/certificate
+```
+
+The evaluation uses process-residualized modality embeddings, a two-level paired bootstrap, majority aggregation of CHSIC indicators, leave-one-seed-out stability analysis, and threshold-sensitivity evaluation.
 
 ## Data
 
-The Intel robotic welding dataset is not bundled. See
-**[docs/data.md](docs/data.md)** for the expected layout and how to set
-`CMR_DATA_ROOT`. 12 fine-grained defect classes aggregate into 6 engineering
-families.
+The Intel Robotic Welding Multimodal Dataset is not redistributed. The expected input interface and defect-family mapping are documented in `docs/data.md`.
 
-## Usage
+## Citation
 
-```bash
-python scripts/train.py
-python scripts/evaluate.py
-python scripts/run_ablations.py            # ablation + baseline matrix
-python scripts/run_ablations.py --smoke    # fast CPU smoke run
-pytest
-```
-
-Certificate, sensitivity, perturbation and resource scripts live in `scripts/`
-(e.g. `family_mediation_diagnostics.py`, `reassign_family_certificates_ci.py`,
-`certificate_sensitivity_sweep.py`, `paired_bootstrap_significance.py`,
-`perturbation_robustness.py`).
-
-## Documentation
-
-- **[docs/certificate_protocol.md](docs/certificate_protocol.md)** — four-value certificate, two-layer protocol, p/q values as diagnostics.
-- **[docs/resource_accounting.md](docs/resource_accounting.md)** — pre-deployment resource reference.
-- **[docs/reproducibility.md](docs/reproducibility.md)** — seeds, splits, frozen certificate parameters.
-- **[docs/data.md](docs/data.md)** — dataset layout and configuration.
-- `docs/cmr_net_design.md` — method / design notes.
-
-## Evaluation metric conventions
-
-All metrics live in `src/cmr_net/evaluation/diagnostics.py` and are shared by
-`scripts/evaluate.py` and `scripts/run_ablations.py`.
-
-- **AUROC / PR-AUC**: macro one-vs-rest over classes present in the split;
-  zero-sup
+Please cite the associated article and dataset sources when using this repository.

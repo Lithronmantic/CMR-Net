@@ -3,39 +3,51 @@
 ## Environment
 
 ```bash
-pip install -e ".[dev]"        # Python >= 3.9, PyTorch >= 2.1
+pip install -r requirements.txt
 ```
 
-## Seeds and splits
+## Configuration
 
-- Training seeds: `0 1 2 3 4` (five seeds).
-- Data split seed: `42` (fixed; group-aware split by top-level process unit, so
-  no process unit appears in more than one of train/val/test).
-
-## Train / evaluate
+Use `configs/welding_inference.yaml` for the robotic-welding evaluation.
 
 ```bash
-python scripts/train.py
-python scripts/evaluate.py
-python scripts/run_ablations.py           # ablation + baseline matrix
-python scripts/run_ablations.py --smoke   # fast CPU smoke run (~1 min)
-pytest
+python scripts/validate_checkpoint.py \
+  --config configs/welding_inference.yaml \
+  --checkpoint /path/to/checkpoint.pt
 ```
 
-## Certificate protocol (frozen paper settings)
+## Evaluation protocol
 
-See `docs/certificate_protocol.md`. The family-level certificate uses these
-pre-evaluation frozen parameters:
+The certificate procedure uses five training seeds, a fixed group-aware data split, 10000 paired-bootstrap replicates, 1000 CHSIC permutations, and leave-one-seed-out stability analysis.
 
-| parameter | value | flag |
-|---|---|---|
-| non-inferiority margin `m` | 0.03 | `--f1-equivalence-margin` |
-| direct-superiority margin `m_sup` | 0.03 | `--direct-gap-margin` |
-| CHSIC equivalence width `delta` | 5e-5 | `--equivalence-delta` |
-| min family size `n_min` | 40 | `--min-family-n` |
-| paired bootstrap `B` | 10000 | `--n-bootstrap 10000` |
-| CHSIC permutations | 1000 | `--n-permutation` |
+| Parameter | Value |
+|---|---:|
+| Predictive Non-Inferiority margin `m` | 0.03 |
+| Residual-Pathway Superiority margin `m_sup` | 0.03 |
+| CHSIC practical-equivalence width `delta` | `5e-5` |
+| Minimum family size `n_min` | 40 |
+| Paired-bootstrap replicates `B` | 10000 |
+| CHSIC permutations | 1000 |
 
-> The published certificates were produced on a multi-GPU server with
-> `--n-bootstrap 10000`. The script's CLI default is lower for quick local
-> runs — pass `--n-bootstrap 10000` to reproduce the paper numbers.
+## Command
+
+```bash
+python scripts/certificate_diagnostics.py \
+  --config configs/welding_inference.yaml \
+  --checkpoint \
+    /path/to/seed0.pt \
+    /path/to/seed1.pt \
+    /path/to/seed2.pt \
+    /path/to/seed3.pt \
+    /path/to/seed4.pt \
+  --split test \
+  --n-bootstrap 10000 \
+  --n-permutation 1000 \
+  --min-family-n 40 \
+  --f1-equivalence-margin 0.03 \
+  --direct-gap-margin 0.03 \
+  --equivalence-delta 5e-5 \
+  --output-dir results/certificate
+```
+
+The generated files are `family_certificates.json` and `family_certificates.md`.
