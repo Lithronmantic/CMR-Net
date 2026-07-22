@@ -37,14 +37,6 @@ Extract the supplied model package so that `src/cmr_net` is available from the r
 export CMR_DATA_ROOT=/path/to/intel_robotic_welding_dataset
 ```
 
-## Checkpoint validation
-
-```bash
-python scripts/validate_checkpoint.py \
-  --config configs/welding_inference.yaml \
-  --checkpoint /path/to/checkpoint.pt
-```
-
 The validation command checks the configuration dimensions, dual-pathway settings, residual gate, direct-head input dimension, and checkpoint contents.
 
 ## Certificate evaluation
